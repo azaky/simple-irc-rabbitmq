@@ -14,8 +14,6 @@ public class IrcClient {
     public static final String DEFAULT_HOST = "localhost";
     public static final int DEFAULT_PORT = 5672;
 
-    private static final String NICK_QUEUE_NAME = "q_nicknames";
-
     private String nickname;
     private final AtomicBoolean isTerminated = new AtomicBoolean(false);
 
@@ -129,20 +127,21 @@ public class IrcClient {
     }
 
     private void handleNick(String requestedNickname) {
+        if (requestedNickname == null) {
+            requestedNickname = "";
+        }
         try {
-            // remove old nickname
-            deleteNickname();
-
-            String tempQueueName = RandomStringUtils.randomAlphanumeric(20);
-            if (requestedNickname == null) {
-                requestedNickname = "";
+            try {
+                deleteNickname();
+            } catch (Exception e) {
+                showMessage("ERROR: failed removing old nickname");
+                e.printStackTrace();
             }
-            sendMessageToQueue(requestedNickname + ":" + tempQueueName, NICK_QUEUE_NAME);
-            String returnedNickname = getMessageFromQueue(tempQueueName);
+            String returnedNickname = requestNickname(requestedNickname);
             if (requestedNickname.isEmpty()) {
                 showMessage("You have been assigned as [" + returnedNickname + "]. Welcome!");
             } else if (!requestedNickname.equals(returnedNickname)) {
-                showMessage("ERROR: nickname " + nickname + " has already taken");
+                showMessage("ERROR: nickname " + requestedNickname + " has already taken");
                 showMessage("You have been assigned as [" + returnedNickname + "] instead. Welcome!");
             } else {
                 showMessage("Welcome [" + returnedNickname + "]!");
@@ -154,25 +153,49 @@ public class IrcClient {
         }
     }
 
-    private void deleteNickname() throws IOException, TimeoutException {
-        if (nickname != null) {
-            sendMessageToQueue(nickname + ":", NICK_QUEUE_NAME);
+    private String requestNickname(String requestedNickname)
+            throws IOException, InterruptedException, TimeoutException {
+        if (requestedNickname.isEmpty() || checkNicknameExist(requestedNickname)) {
+            String generatedNickname = RandomStringUtils.randomAlphanumeric(5);
+            registerNickname(generatedNickname);
+            return generatedNickname;
+        } else {
+            registerNickname(requestedNickname);
+            return requestedNickname;
         }
     }
 
-    private String getMessageFromQueue(String queueName) throws IOException, InterruptedException {
+    private void registerNickname(String nickname) throws IOException, TimeoutException {
+        String queueName = getQueueForNickname(nickname);
         Channel channel = connection.createChannel();
         channel.queueDeclare(queueName, false, false, false, null);
-        QueueingConsumer consumer = new QueueingConsumer(channel);
-        channel.basicConsume(queueName, true, consumer);
-        QueueingConsumer.Delivery delivery = consumer.nextDelivery(3000);
-        return new String(delivery.getBody(), "UTF-8");
-    }
-
-    private void sendMessageToQueue(String message, String queueName) throws IOException, TimeoutException {
-        Channel channel = connection.createChannel();
-        channel.queueDeclare(queueName, false, false, false, null);
-        channel.basicPublish("", queueName, null, message.getBytes("UTF-8"));
+        channel.basicPublish("", queueName, null, "".getBytes("UTF-8"));
         channel.close();
     }
+
+    private boolean checkNicknameExist(String requestedNickname) {
+        String queueName = getQueueForNickname(requestedNickname);
+        try {
+            Channel channel = connection.createChannel();
+            channel.queueDeclarePassive(queueName); // Check if queue exists
+            channel.close();
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private void deleteNickname() throws IOException, TimeoutException {
+        if (nickname != null) {
+            String queueName = getQueueForNickname(nickname);
+            Channel channel = connection.createChannel();
+            channel.queueDelete(queueName);
+            channel.close();
+        }
+    }
+
+    private String getQueueForNickname(String requestedNickname) {
+        return "q_nick_" + requestedNickname;
+    }
+
 }
