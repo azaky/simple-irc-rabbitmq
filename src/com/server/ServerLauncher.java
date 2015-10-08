@@ -1,21 +1,23 @@
-package com.client;
+package com.server;
 
-public class ClientLauncher {
+/**
+ * Created by Ahmad Zaky on 10/9/2015.
+ */
+public class ServerLauncher {
 
     public static void main(String[] args) {
-        String host = IrcClient.DEFAULT_HOST;
-        int port = IrcClient.DEFAULT_PORT;
+        String host = IrcServer.DEFAULT_HOST;
+        int port = IrcServer.DEFAULT_PORT;
         if (args.length >= 2) {
             host = args[0];
             port = Integer.parseInt(args[1]);
         }
         try {
-            IrcClient launcher = new IrcClient(host, port);
-            launcher.launch();
+            IrcServer server = new IrcServer(host, port);
+            server.start();
         } catch (Exception e) {
             System.err.println("Something bad happened when trying to start client");
             e.printStackTrace();
         }
     }
-
 }

@@ -1,96 +1,57 @@
 package com.client;
 
-import if4031.UserService;
-import org.apache.thrift.TException;
-import org.apache.thrift.protocol.TBinaryProtocol;
-import org.apache.thrift.protocol.TProtocol;
-import org.apache.thrift.transport.TSocket;
-import org.apache.thrift.transport.TTransport;
+import com.rabbitmq.client.*;
+import org.apache.commons.lang3.RandomStringUtils;
 
-import java.util.HashSet;
+import java.io.IOException;
 import java.util.List;
 import java.util.Scanner;
-import java.util.Set;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class IrcClient {
 
     public static final String DEFAULT_HOST = "localhost";
-    public static final int DEFAULT_PORT = 9090;
-    private static final long POLLING_PERIOD = 3000;
+    public static final int DEFAULT_PORT = 5672;
 
-    private final UserService.Client client;
-    private final TTransport transport;
-    private final String token;
-    private final AtomicBoolean isTerminated = new AtomicBoolean(false);
-    private final Set<String> channels = new HashSet<>();
+    private static final String NICK_QUEUE_NAME = "q_nicknames";
+
     private String nickname;
+    private final AtomicBoolean isTerminated = new AtomicBoolean(false);
 
-    public IrcClient(UserService.Client client, TTransport transport) {
-        this.client = client;
-        this.transport = transport;
-        try {
-            this.token = client.getToken();
-            this.nickname = client.getNickname(token);
-        } catch (TException e) {
-            throw new RuntimeException("Unable to create ClientLauncher", e);
+    private Connection connection;
+    private boolean connectionEstablished = false;
+    private ConnectionFactory factory = new ConnectionFactory();
+
+    public IrcClient() {
+        factory = new ConnectionFactory();
+        factory.setHost(DEFAULT_HOST);
+        factory.setPort(DEFAULT_PORT);
+    }
+
+    public IrcClient(String host, int port) {
+        factory = new ConnectionFactory();
+        factory.setHost(host);
+        factory.setPort(port);
+    }
+
+    void setupConnection() throws IOException, TimeoutException {
+        connection = factory.newConnection();
+        connectionEstablished = true;
+    }
+
+    public void launch() throws IOException, TimeoutException {
+        if (!connectionEstablished) {
+            setupConnection();
         }
-    }
-
-    public static IrcClient create(String host, int port) {
-        try {
-            TTransport transport = new TSocket(host, port);
-            transport.open();
-            TProtocol protocol = new TBinaryProtocol(transport);
-            UserService.Client client = new UserService.Client(protocol);
-            return new IrcClient(client, transport);
-        } catch (TException e) {
-            throw new RuntimeException("Unable to create ClientLauncher", e);
-        }
-    }
-
-    public static IrcClient create() {
-        return create(DEFAULT_HOST, DEFAULT_PORT);
-    }
-
-    public void launch() {
         Thread inputHandler = getInputHandler();
         inputHandler.start();
-        Thread messageFetcher = getMessageFetcher();
-        messageFetcher.start();
         try {
             inputHandler.join();
-            messageFetcher.join();
+            connection.close();
         } catch (InterruptedException e) {
             throw new IllegalStateException(e);
-        } finally {
-            transport.close();
         }
-    }
-
-    private Thread getMessageFetcher() {
-        return new Thread() {
-            @Override
-            public void run() {
-                try {
-                    while (!isTerminated.get()) {
-                        try {
-                            List<String> messages = client.getMessage(token);
-                            for (String message : messages) {
-                                showMessage(message);
-                            }
-                        } catch (TException e) {
-                            showMessage("ERROR: Something happens when trying to fetch message: " + e.getMessage());
-                            showMessage("       Please press <Enter> to terminate ...");
-                            terminate();
-                        }
-                        Thread.sleep(POLLING_PERIOD);
-                    }
-                } catch (InterruptedException e) {
-                    showMessage("ERROR: messageFetcher was interrupted: " + e.getMessage());
-                }
-            }
-        };
     }
 
     private void terminate() {
@@ -116,51 +77,102 @@ public class IrcClient {
 
     private void handleInput(String input) {
         List<String> groups;
-        try {
-            if ((groups = CommandRegexes.NICK.match(input)) != null) {
-                nickname = groups.get(0);
-                if (nickname == null) {
-                    nickname = client.getNickname(token);
-                } else {
-                    if (!client.setNickname(token, nickname)) {
-                        showMessage("ERROR: nickname " + nickname + " has already taken");
-                        nickname = null;
-                    }
-                }
-                if (nickname != null) {
-                    showMessage("Welcome " + nickname + "!");
-                }
-            } else if ((groups = CommandRegexes.JOIN.match(input)) != null) {
-                String channelName = groups.get(0);
-                if (channels.contains(channelName)) {
-                    showMessage("WARNING: You have already joined channel " + channelName);
-                } else {
-                    client.joinChannel(token, channelName);
-                    channels.add(channelName);
-                    showMessage("Joined channel " + channelName);
-                }
-            } else if ((groups = CommandRegexes.LEAVE.match(input)) != null) {
-                String channelName = groups.get(0);
-                if (channels.contains(channelName)) {
-                    client.leaveChannel(token, channelName);
-                    channels.remove(channelName);
-                    showMessage("Leaving channel " + channelName);
-                } else {
-                    showMessage("WARNING: You haven't joined channel " + channelName);
-                }
-            } else if (CommandRegexes.EXIT.match(input) != null) {
-                client.exit(token);
-                terminate();
-                showMessage("Bye bye!");
-            } else if ((groups = CommandRegexes.MESSAGE_CHANNEL.match(input)) != null) {
-                String channelName = groups.get(0);
-                String message = groups.get(1);
-                client.sendMessageToChannel(token, message, channelName);
-            } else { // Assuming broadcast
-                client.sendMessage(token, input);
-            }
-        } catch (TException e) {
-            showMessage("ERROR: error while handling input: " + e.getMessage());
+
+        if ((groups = CommandRegexes.NICK.match(input)) != null) {
+            handleNick(groups.get(0));
+        } else if ((groups = CommandRegexes.JOIN.match(input)) != null) {
+            String channelName = groups.get(0);
+            handleJoin(channelName);
+        } else if ((groups = CommandRegexes.LEAVE.match(input)) != null) {
+            String channelName = groups.get(0);
+            handleLeave(channelName);
+        } else if (CommandRegexes.EXIT.match(input) != null) {
+            handleExit();
+        } else if ((groups = CommandRegexes.MESSAGE_CHANNEL.match(input)) != null) {
+            String channelName = groups.get(0);
+            String message = groups.get(1);
+            handleMessageChannel(message, channelName);
+        } else { // Assuming broadcast
+            handleBroadcast(input);
         }
+    }
+
+    private void handleBroadcast(String message) {
+        // TODO
+        System.out.println("This is not implemented yet");
+    }
+
+    private void handleMessageChannel(String message, String channelName) {
+        // TODO
+        System.out.println("This is not implemented yet");
+    }
+
+    private void handleLeave(String channelName) {
+        // TODO
+        System.out.println("This is not implemented yet");
+    }
+
+    private void handleJoin(String channelName) {
+        // TODO
+        System.out.println("This is not implemented yet");
+    }
+
+    private void handleExit() {
+        try {
+            deleteNickname();
+            showMessage("Bye bye!");
+            terminate();
+        } catch (Exception e) {
+            System.err.println("Something bad happened");
+            e.printStackTrace();
+        }
+    }
+
+    private void handleNick(String requestedNickname) {
+        try {
+            // remove old nickname
+            deleteNickname();
+
+            String tempQueueName = RandomStringUtils.randomAlphanumeric(20);
+            if (requestedNickname == null) {
+                requestedNickname = "";
+            }
+            sendMessageToQueue(requestedNickname + ":" + tempQueueName, NICK_QUEUE_NAME);
+            String returnedNickname = getMessageFromQueue(tempQueueName);
+            if (requestedNickname.isEmpty()) {
+                showMessage("You have been assigned as [" + returnedNickname + "]. Welcome!");
+            } else if (!requestedNickname.equals(returnedNickname)) {
+                showMessage("ERROR: nickname " + nickname + " has already taken");
+                showMessage("You have been assigned as [" + returnedNickname + "] instead. Welcome!");
+            } else {
+                showMessage("Welcome [" + returnedNickname + "]!");
+            }
+            nickname = returnedNickname;
+        } catch (Exception e) {
+            System.err.println("Something bad happened");
+            e.printStackTrace();
+        }
+    }
+
+    private void deleteNickname() throws IOException, TimeoutException {
+        if (nickname != null) {
+            sendMessageToQueue(nickname + ":", NICK_QUEUE_NAME);
+        }
+    }
+
+    private String getMessageFromQueue(String queueName) throws IOException, InterruptedException {
+        Channel channel = connection.createChannel();
+        channel.queueDeclare(queueName, false, false, false, null);
+        QueueingConsumer consumer = new QueueingConsumer(channel);
+        channel.basicConsume(queueName, true, consumer);
+        QueueingConsumer.Delivery delivery = consumer.nextDelivery(3000);
+        return new String(delivery.getBody(), "UTF-8");
+    }
+
+    private void sendMessageToQueue(String message, String queueName) throws IOException, TimeoutException {
+        Channel channel = connection.createChannel();
+        channel.queueDeclare(queueName, false, false, false, null);
+        channel.basicPublish("", queueName, null, message.getBytes("UTF-8"));
+        channel.close();
     }
 }
