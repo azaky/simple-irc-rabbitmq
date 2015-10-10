@@ -11,9 +11,6 @@ import java.util.concurrent.TimeoutException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/**
- * Created by Ahmad Zaky on 10/9/2015.
- */
 public class IrcServer {
 
     public static final String DEFAULT_HOST = "localhost";
@@ -27,12 +24,6 @@ public class IrcServer {
     private boolean connectionEstablished = false;
     private ConnectionFactory factory = new ConnectionFactory();
     private Channel mainChannel;
-
-    public IrcServer() {
-        factory = new ConnectionFactory();
-        factory.setHost(DEFAULT_HOST);
-        factory.setPort(DEFAULT_PORT);
-    }
 
     public IrcServer(String host, int port) {
         factory = new ConnectionFactory();

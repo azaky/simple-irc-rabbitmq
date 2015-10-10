@@ -4,8 +4,8 @@ import com.rabbitmq.client.*;
 import org.apache.commons.lang3.RandomStringUtils;
 
 import java.io.IOException;
-import java.util.List;
-import java.util.Scanner;
+import java.util.*;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -15,17 +15,13 @@ public class IrcClient {
     public static final int DEFAULT_PORT = 5672;
 
     private String nickname;
+    private final LinkedBlockingQueue queueMessage = new LinkedBlockingQueue();
+    private final Map<String, Channel> registeredExchange = new TreeMap<>();
     private final AtomicBoolean isTerminated = new AtomicBoolean(false);
 
     private Connection connection;
     private boolean connectionEstablished = false;
     private ConnectionFactory factory = new ConnectionFactory();
-
-    public IrcClient() {
-        factory = new ConnectionFactory();
-        factory.setHost(DEFAULT_HOST);
-        factory.setPort(DEFAULT_PORT);
-    }
 
     public IrcClient(String host, int port) {
         factory = new ConnectionFactory();
@@ -42,6 +38,10 @@ public class IrcClient {
         if (!connectionEstablished) {
             setupConnection();
         }
+
+        // Get initial username first
+        handleNick(null);
+
         Thread inputHandler = getInputHandler();
         inputHandler.start();
         try {
@@ -68,6 +68,13 @@ public class IrcClient {
                 while (!isTerminated.get()) {
                     String line = scanner.nextLine();
                     handleInput(line);
+                    while (!queueMessage.isEmpty()) {
+                        try {
+                            showMessage((String) queueMessage.take());
+                        } catch (InterruptedException e) {
+                            e.printStackTrace();
+                        }
+                    }
                 }
             }
         };
@@ -96,23 +103,62 @@ public class IrcClient {
     }
 
     private void handleBroadcast(String message) {
-        // TODO
-        System.out.println("This is not implemented yet");
+        for (Map.Entry<String, Channel> exchange : registeredExchange.entrySet()) {
+            try {
+                exchange.getValue().basicPublish(exchange.getKey(), "", null, ("(" + nickname + ") " + message).getBytes());
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
     }
 
     private void handleMessageChannel(String message, String channelName) {
-        // TODO
-        System.out.println("This is not implemented yet");
+        if (!registeredExchange.containsKey(channelName)) {
+            showMessage("You are not registered to " + channelName);
+            return;
+        }
+        Channel channel = registeredExchange.get(channelName);
+        try {
+            channel.basicPublish(channelName, "", null, ("(" + nickname + ") " + message).getBytes());
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
     }
 
     private void handleLeave(String channelName) {
-        // TODO
-        System.out.println("This is not implemented yet");
+        if (!registeredExchange.containsKey(channelName)) {
+            showMessage("You are not registered to " + channelName);
+            return;
+        }
+        Channel channel = registeredExchange.get(channelName);
+        try {
+            channel.close();
+        } catch (IOException e) {
+            e.printStackTrace();
+        } catch (TimeoutException e) {
+            showMessage("Connection timeout");
+            e.printStackTrace();
+        }
+        showMessage("You have leaved " + channelName);
+        registeredExchange.remove(channelName);
     }
 
     private void handleJoin(String channelName) {
-        // TODO
-        System.out.println("This is not implemented yet");
+        try {
+            if (!registeredExchange.containsKey(channelName)) {
+                Channel channel = connection.createChannel();
+                channel.exchangeDeclare(channelName, "fanout");
+                String exchangeQueueName = channel.queueDeclare().getQueue();
+                channel.queueBind(exchangeQueueName, channelName, "");
+
+                Consumer consumer = new ChannelConsumer(channel, channelName, queueMessage);
+                channel.basicConsume(exchangeQueueName, true, consumer);
+                registeredExchange.put(channelName, channel);
+            }
+            showMessage("You have joined " + channelName);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
     }
 
     private void handleExit() {

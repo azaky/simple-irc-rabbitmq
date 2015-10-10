@@ -1,5 +1,8 @@
 package com.client;
 
+/**
+ * Client Main
+ */
 public class ClientLauncher {
 
     public static void main(String[] args) {

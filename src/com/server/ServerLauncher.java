@@ -1,7 +1,7 @@
 package com.server;
 
 /**
- * Created by Ahmad Zaky on 10/9/2015.
+ * Server Main
  */
 public class ServerLauncher {
 
@@ -16,8 +16,9 @@ public class ServerLauncher {
             IrcServer server = new IrcServer(host, port);
             server.start();
         } catch (Exception e) {
-            System.err.println("Something bad happened when trying to start client");
+            System.err.println("Something bad happened when trying to start server");
             e.printStackTrace();
         }
     }
+
 }
